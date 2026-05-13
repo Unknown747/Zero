@@ -76,15 +76,6 @@ export function startScanner(wsProvider, onNewPair) {
   logger.info(`Listening to Aerodrome Factory (${config.aerodromeFactory})...`);
 
   // ─── Error handling ────────────────────────────────────────────────
-  wsProvider.on('error', (err) => {
-    logger.error(`WebSocket provider error: ${err.message}`);
-  });
-
-  uniV3Factory.on('error', (err) => {
-    logger.error(`Uniswap V3 Factory listener error: ${err.message}`);
-  });
-
-  aerodromeFactory.on('error', (err) => {
-    logger.error(`Aerodrome Factory listener error: ${err.message}`);
-  });
+  // Note: ethers.js v6 contracts do not support .on('error').
+  // Provider-level errors are handled via the websocket's underlying connection.
 }

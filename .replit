@@ -31,3 +31,26 @@ MAX_TAX_PCT = "10"
 MAX_RISK_SCORE = "30"
 HOLDER_CONCENTRATION_THRESHOLD = "30"
 MONITOR_INTERVAL_MS = "5000"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Sniper Bot"
+
+[[workflows.workflow]]
+name = "Sniper Bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node index.js"
+
+[workflows.workflow.metadata]
+outputType = "console"
