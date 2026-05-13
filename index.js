@@ -5,7 +5,7 @@ import { logger } from './src/logger.js';
 import { startScanner } from './src/scanner.js';
 import { checkTokenSecurity } from './src/security.js';
 import { PositionManager, Position } from './src/position.js';
-import { executeBuy, getTokenBalance } from './src/trade.js';
+import { executeBuy } from './src/trade.js';
 import { startMonitor } from './src/monitor.js';
 import { getTokenPrice } from './src/price.js';
 
@@ -13,10 +13,10 @@ import { getTokenPrice } from './src/price.js';
 // State
 // ─────────────────────────────────────────────────────────────
 const positionManager = new PositionManager();
-const processingTokens = new Set(); // prevent duplicate processing
+const processingTokens = new Set(); // deduplicate concurrent pair events
 
 // ─────────────────────────────────────────────────────────────
-// Provider + Signer
+// Providers + Signer
 // ─────────────────────────────────────────────────────────────
 let wsProvider;
 let httpProvider;
@@ -36,7 +36,7 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
   const tokenKey = tokenAddress.toLowerCase();
 
   if (processingTokens.has(tokenKey)) {
-    logger.warn(`Already processing ${tokenAddress}, skipping`);
+    logger.warn(`Already processing ${tokenAddress}, skipping duplicate`);
     return;
   }
 
@@ -50,7 +50,6 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
     // ── Check position limit ──────────────────────────────────
     if (!positionManager.canOpenNew()) {
       logger.warn(`Max open positions (${config.maxOpenPositions}) reached. Skipping.`);
-      processingTokens.delete(tokenKey);
       return;
     }
 
@@ -59,12 +58,11 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
     const security = await checkTokenSecurity(tokenAddress);
 
     if (!security.passed) {
-      logger.warn(`Token REJECTED. Reasons: ${security.reasons.join(', ')}`);
-      processingTokens.delete(tokenKey);
+      logger.warn(`Token REJECTED. Reasons: ${security.reasons.join(' | ')}`);
       return;
     }
 
-    logger.success(`Security check PASSED (risk score: ${security.riskScore})`);
+    logger.success(`Security PASSED (risk score: ${security.riskScore}/100)`);
     logger.info(`  Liquidity: $${security.liquidity.toFixed(0)}`);
     logger.info(`  Tax: buy=${security.buyTax}% sell=${security.sellTax}%`);
     logger.info(`  Verified: ${security.isVerified}`);
@@ -74,28 +72,25 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
     const amountInWei = await positionManager.computeTradeAmount(httpProvider, signer.address);
     if (!amountInWei) {
       logger.warn(`Insufficient balance to trade. Skipping.`);
-      processingTokens.delete(tokenKey);
       return;
     }
 
     logger.trade(`Trade amount: ${ethers.formatEther(amountInWei)} ETH`);
 
-    // ── Get entry price before buy ────────────────────────────
+    // ── Get entry price (on-chain) ────────────────────────────
     const entryPrice = await getTokenPrice(httpProvider, tokenAddress, pairAddress, dex);
-    if (!entryPrice) {
-      logger.warn(`Could not fetch entry price for ${tokenAddress}. Skipping.`);
-      processingTokens.delete(tokenKey);
+    if (!entryPrice || entryPrice === 0) {
+      logger.warn(`Could not fetch entry price. Skipping.`);
       return;
     }
 
-    logger.trade(`Entry price: ${entryPrice}`);
+    logger.trade(`Entry price: $${entryPrice.toFixed(8)}`);
 
     // ── Execute Buy ───────────────────────────────────────────
     const buyResult = await executeBuy({
       signer,
       provider: httpProvider,
       tokenAddress,
-      pairAddress,
       dex,
       amountInWei,
       fee: fee ?? 3000,
@@ -104,7 +99,6 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
 
     if (!buyResult.success) {
       logger.error(`Buy failed: ${buyResult.error}`);
-      processingTokens.delete(tokenKey);
       return;
     }
 
@@ -118,17 +112,17 @@ async function handleNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee,
       tokenAmount: buyResult.tokenAmount,
       tokenDecimals: buyResult.tokenDecimals,
       symbol: buyResult.symbol,
-      fee,
-      stable,
+      fee: fee ?? 3000,
+      stable: stable ?? false,
     });
 
     positionManager.add(position);
 
     logger.success(`\nPosition #${position.id} opened!`);
     logger.success(`  Token: ${buyResult.name} (${buyResult.symbol})`);
-    logger.success(`  Amount in: ${ethers.formatEther(amountInWei)} ETH`);
+    logger.success(`  ETH in: ${ethers.formatEther(amountInWei)}`);
     logger.success(`  Tokens received: ${ethers.formatUnits(buyResult.tokenAmount, buyResult.tokenDecimals)}`);
-    logger.success(`  Entry price: ${entryPrice}`);
+    logger.success(`  Entry price: $${entryPrice.toFixed(8)}`);
     logger.info(`${'─'.repeat(60)}\n`);
   } catch (e) {
     logger.error(`handleNewPair error: ${e.message}`);
@@ -156,21 +150,17 @@ async function reconnectWs() {
 async function main() {
   console.log(`
 ╔═══════════════════════════════════════════════════╗
-║         BASE NETWORK SNIPER BOT v1.0             ║
+║         BASE NETWORK SNIPER BOT v1.1             ║
 ║   Uniswap V3 + Aerodrome | ethers.js v6          ║
 ╚═══════════════════════════════════════════════════╝
 `);
 
-  // Validate env
-  logger.info(`Validating configuration...`);
-  logger.info(`  RPC HTTP: ${config.rpcHttp.slice(0, 40)}...`);
-  logger.info(`  Max position size: ${(config.maxPositionSizePct * 100).toFixed(0)}%`);
-  logger.info(`  Max open positions: ${config.maxOpenPositions}`);
-  logger.info(`  Slippage: ${config.slippagePct}%`);
-  logger.info(`  Stop Loss: ${config.slPct}%`);
-  logger.info(`  Min Liquidity: $${config.minLiquidityUsd}`);
-  logger.info(`  Max Tax: ${config.maxTaxPct}%`);
-  logger.info(`  Max Risk Score: ${config.maxRiskScore}`);
+  logger.info(`Configuration:`);
+  logger.info(`  RPC HTTP : ${config.rpcHttp.slice(0, 45)}...`);
+  logger.info(`  Max pos  : ${(config.maxPositionSizePct * 100).toFixed(0)}% per trade, ${config.maxOpenPositions} max open`);
+  logger.info(`  Slippage : ${config.slippagePct}%  |  SL: ${config.slPct}%  |  Trailing: ${config.trailingDistancePct}%`);
+  logger.info(`  TP levels: +${config.tp1Pct}% → sell ${config.tp1SellPct}% | +${config.tp2Pct}% → sell ${config.tp2SellPct}% | +${config.tp3Pct}% → sell ${config.tp3SellPct}%`);
+  logger.info(`  Security : liq≥$${config.minLiquidityUsd}, tax≤${config.maxTaxPct}%, risk<${config.maxRiskScore}`);
 
   createProviders();
 
@@ -179,16 +169,16 @@ async function main() {
   logger.info(`Wallet balance: ${ethers.formatEther(balance)} ETH`);
 
   if (balance === 0n) {
-    logger.warn(`WARNING: Wallet has 0 ETH. Trades will fail.`);
+    logger.warn(`WARNING: Wallet has 0 ETH — trades will fail until funded.`);
   }
 
-  // Start scanner
+  // Start scanner (WebSocket)
   startScanner(wsProvider, handleNewPair);
 
-  // Start monitor
+  // Start monitoring loop (HTTP, every 5s)
   startMonitor(httpProvider, signer, positionManager);
 
-  // WebSocket keepalive
+  // WebSocket keepalive + reconnect every 30s
   setInterval(async () => {
     try {
       await wsProvider.getBlockNumber();
@@ -198,17 +188,17 @@ async function main() {
   }, 30_000);
 
   // Graceful shutdown
-  process.on('SIGINT', async () => {
+  process.on('SIGINT', () => {
     logger.warn(`Shutting down...`);
-    const openPositions = positionManager.getAll();
-    if (openPositions.length > 0) {
-      logger.warn(`WARNING: ${openPositions.length} open position(s) will NOT be auto-sold on shutdown:`);
-      openPositions.forEach((p) => logger.warn(`  #${p.id} ${p.symbol} (${p.tokenAddress})`));
+    const open = positionManager.getAll();
+    if (open.length > 0) {
+      logger.warn(`WARNING: ${open.length} open position(s) NOT auto-sold on exit:`);
+      open.forEach((p) => logger.warn(`  #${p.id} ${p.symbol} | ${p.tokenAddress}`));
     }
     process.exit(0);
   });
 
-  logger.success(`Bot is running. Waiting for new pairs...\n`);
+  logger.success(`Bot running. Listening for new pairs on Base...\n`);
 }
 
 main().catch((e) => {

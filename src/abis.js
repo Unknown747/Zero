@@ -1,11 +1,13 @@
-// Uniswap V3 Factory ABI (only PairCreated event needed)
+// Uniswap V3 Factory ABI
 export const UNISWAP_V3_FACTORY_ABI = [
   'event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)',
 ];
 
 // Aerodrome Factory ABI
+// NOTE: `stable` is NOT indexed in the actual Aerodrome V1 contract on Base.
+// Marking it as indexed causes ethers to look for it in topics instead of data → wrong decoding.
 export const AERODROME_FACTORY_ABI = [
-  'event PairCreated(address indexed token0, address indexed token1, bool indexed stable, address pair, uint256)',
+  'event PairCreated(address indexed token0, address indexed token1, bool stable, address pair, uint256)',
 ];
 
 // Uniswap V3 Pool ABI (for slot0 price)
@@ -24,7 +26,7 @@ export const AERODROME_PAIR_ABI = [
   'function stable() external view returns (bool)',
 ];
 
-// Uniswap V3 Router ABI
+// Uniswap V3 Router ABI (SwapRouter02 on Base)
 export const UNISWAP_V3_ROUTER_ABI = [
   'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountOut)',
   'function exactOutputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountIn)',
@@ -32,9 +34,9 @@ export const UNISWAP_V3_ROUTER_ABI = [
 
 // Aerodrome Router ABI
 export const AERODROME_ROUTER_ABI = [
-  `function swapExactETHForTokens(uint amountOutMin, (address from, address to, bool stable, address factory)[] calldata routes, address to, uint deadline) external payable returns (uint[] memory amounts)`,
-  `function swapExactTokensForETH(uint amountIn, uint amountOutMin, (address from, address to, bool stable, address factory)[] calldata routes, address to, uint deadline) external returns (uint[] memory amounts)`,
-  `function getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] calldata routes) external view returns (uint[] memory amounts)`,
+  'function swapExactETHForTokens(uint amountOutMin, (address from, address to, bool stable, address factory)[] calldata routes, address to, uint deadline) external payable returns (uint[] memory amounts)',
+  'function swapExactTokensForETH(uint amountIn, uint amountOutMin, (address from, address to, bool stable, address factory)[] calldata routes, address to, uint deadline) external returns (uint[] memory amounts)',
+  'function getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] calldata routes) external view returns (uint[] memory amounts)',
 ];
 
 // ERC20 ABI

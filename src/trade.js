@@ -6,10 +6,9 @@ import {
   AERODROME_ROUTER_ABI,
   ERC20_ABI,
 } from './abis.js';
-import { getPriceFromDexScreener } from './price.js';
 
 function deadline() {
-  return Math.floor(Date.now() / 1000) + 300; // 5 minutes
+  return Math.floor(Date.now() / 1000) + 300; // 5 minutes from now
 }
 
 async function getGasOverrides(provider) {
@@ -25,7 +24,8 @@ async function getGasOverrides(provider) {
 
 async function ensureApproval(signer, tokenAddress, spender, amount) {
   const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-  const allowance = await token.allowance(await signer.getAddress(), spender);
+  const owner = await signer.getAddress();
+  const allowance = await token.allowance(owner, spender);
   if (allowance < amount) {
     logger.trade(`Approving ${spender} to spend tokens...`);
     const tx = await token.approve(spender, ethers.MaxUint256);
@@ -35,13 +35,12 @@ async function ensureApproval(signer, tokenAddress, spender, amount) {
 }
 
 // ─────────────────────────────────────────────
-// BUY via Uniswap V3
+// BUY via Uniswap V3 (SwapRouter02 on Base)
+// tokenIn = WETH + msg.value → router auto-wraps ETH
 // ─────────────────────────────────────────────
-async function buyViaUniswapV3(signer, provider, tokenAddress, amountInWei, fee = 3000) {
+async function buyViaUniswapV3(signer, provider, tokenAddress, amountInWei, fee) {
   const router = new ethers.Contract(config.uniswapV3Router, UNISWAP_V3_ROUTER_ABI, signer);
-  const slippageFactor = 1 - config.slippagePct / 100;
 
-  // Estimate output (rough: amountOutMinimum = 0 * slippage, use 0 as min for sniper)
   const params = {
     tokenIn: config.WETH,
     tokenOut: tokenAddress,
@@ -49,14 +48,14 @@ async function buyViaUniswapV3(signer, provider, tokenAddress, amountInWei, fee 
     recipient: await signer.getAddress(),
     deadline: deadline(),
     amountIn: amountInWei,
-    amountOutMinimum: 0n, // Sniper mode: accept any amount
+    amountOutMinimum: 0n, // sniper mode — accept any output
     sqrtPriceLimitX96: 0n,
   };
 
   const overrides = await getGasOverrides(provider);
   overrides.value = amountInWei;
 
-  logger.trade(`Buying via Uniswap V3: ${ethers.formatEther(amountInWei)} ETH → ${tokenAddress}`);
+  logger.trade(`Buying via Uniswap V3: ${ethers.formatEther(amountInWei)} ETH → ${tokenAddress} (fee: ${fee})`);
   const tx = await router.exactInputSingle(params, overrides);
   logger.trade(`Buy TX sent: ${tx.hash}`);
   const receipt = await tx.wait();
@@ -67,7 +66,7 @@ async function buyViaUniswapV3(signer, provider, tokenAddress, amountInWei, fee 
 // ─────────────────────────────────────────────
 // BUY via Aerodrome
 // ─────────────────────────────────────────────
-async function buyViaAerodrome(signer, provider, tokenAddress, amountInWei, stable = false) {
+async function buyViaAerodrome(signer, provider, tokenAddress, amountInWei, stable) {
   const router = new ethers.Contract(config.aerodromeRouter, AERODROME_ROUTER_ABI, signer);
 
   const routes = [
@@ -82,7 +81,7 @@ async function buyViaAerodrome(signer, provider, tokenAddress, amountInWei, stab
   const overrides = await getGasOverrides(provider);
   overrides.value = amountInWei;
 
-  logger.trade(`Buying via Aerodrome: ${ethers.formatEther(amountInWei)} ETH → ${tokenAddress}`);
+  logger.trade(`Buying via Aerodrome: ${ethers.formatEther(amountInWei)} ETH → ${tokenAddress} (stable: ${stable})`);
   const tx = await router.swapExactETHForTokens(
     0n, // amountOutMin = 0 (sniper mode)
     routes,
@@ -99,7 +98,7 @@ async function buyViaAerodrome(signer, provider, tokenAddress, amountInWei, stab
 // ─────────────────────────────────────────────
 // SELL via Uniswap V3
 // ─────────────────────────────────────────────
-async function sellViaUniswapV3(signer, provider, tokenAddress, amountTokens, fee = 3000) {
+async function sellViaUniswapV3(signer, provider, tokenAddress, amountTokens, fee) {
   await ensureApproval(signer, tokenAddress, config.uniswapV3Router, amountTokens);
 
   const router = new ethers.Contract(config.uniswapV3Router, UNISWAP_V3_ROUTER_ABI, signer);
@@ -115,7 +114,7 @@ async function sellViaUniswapV3(signer, provider, tokenAddress, amountTokens, fe
   };
 
   const overrides = await getGasOverrides(provider);
-  logger.trade(`Selling via Uniswap V3: ${amountTokens} tokens → ETH`);
+  logger.trade(`Selling via Uniswap V3: ${amountTokens} tokens → ETH (fee: ${fee})`);
   const tx = await router.exactInputSingle(params, overrides);
   logger.trade(`Sell TX sent: ${tx.hash}`);
   const receipt = await tx.wait();
@@ -126,7 +125,7 @@ async function sellViaUniswapV3(signer, provider, tokenAddress, amountTokens, fe
 // ─────────────────────────────────────────────
 // SELL via Aerodrome
 // ─────────────────────────────────────────────
-async function sellViaAerodrome(signer, provider, tokenAddress, amountTokens, stable = false) {
+async function sellViaAerodrome(signer, provider, tokenAddress, amountTokens, stable) {
   await ensureApproval(signer, tokenAddress, config.aerodromeRouter, amountTokens);
 
   const router = new ethers.Contract(config.aerodromeRouter, AERODROME_ROUTER_ABI, signer);
@@ -140,7 +139,7 @@ async function sellViaAerodrome(signer, provider, tokenAddress, amountTokens, st
   ];
 
   const overrides = await getGasOverrides(provider);
-  logger.trade(`Selling via Aerodrome: ${amountTokens} tokens → ETH`);
+  logger.trade(`Selling via Aerodrome: ${amountTokens} tokens → ETH (stable: ${stable})`);
   const tx = await router.swapExactTokensForETH(
     amountTokens,
     0n,
@@ -156,21 +155,12 @@ async function sellViaAerodrome(signer, provider, tokenAddress, amountTokens, st
 }
 
 // ─────────────────────────────────────────────
-// Get token balance
-// ─────────────────────────────────────────────
-export async function getTokenBalance(provider, walletAddress, tokenAddress) {
-  const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-  return token.balanceOf(walletAddress);
-}
-
-// ─────────────────────────────────────────────
 // EXECUTE BUY (public API)
 // ─────────────────────────────────────────────
 export async function executeBuy({
   signer,
   provider,
   tokenAddress,
-  pairAddress,
   dex,
   amountInWei,
   fee = 3000,
@@ -184,7 +174,7 @@ export async function executeBuy({
       receipt = await buyViaAerodrome(signer, provider, tokenAddress, amountInWei, stable);
     }
 
-    // Get token balance after buy
+    // Read token balance + metadata after buy
     const walletAddress = await signer.getAddress();
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
     const [tokenBalance, decimals, symbol, name] = await Promise.all([

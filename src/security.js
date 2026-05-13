@@ -11,18 +11,20 @@ async function safeGet(url, params = {}, timeout = 8000) {
   try {
     const res = await axios.get(url, { params, timeout });
     return res.data;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 // A. Honeypot check via honeypot.is
 async function checkHoneypot(tokenAddress) {
-  const url = `https://api.honeypot.is/v1/GetTokenInfo`;
-  const data = await safeGet(url, { network: 'base', token: tokenAddress });
+  const data = await safeGet('https://api.honeypot.is/v1/GetTokenInfo', {
+    network: 'base',
+    token: tokenAddress,
+  });
 
   if (!data) {
-    logger.security(`[Honeypot] No response for ${tokenAddress}, skipping check`);
+    logger.security(`[Honeypot] No response for ${tokenAddress} — treating as safe`);
     return { isHoneypot: false, buyTax: 0, sellTax: 0 };
   }
 
@@ -35,8 +37,7 @@ async function checkHoneypot(tokenAddress) {
 
 // C. Liquidity check via DexScreener
 async function checkLiquidity(tokenAddress) {
-  const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`;
-  const data = await safeGet(url);
+  const data = await safeGet(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
 
   if (!data || !data.pairs) return 0;
 
@@ -46,15 +47,13 @@ async function checkLiquidity(tokenAddress) {
 
   if (!basePairs.length) return 0;
 
-  // Take the pair with highest liquidity
   const best = basePairs.sort((a, b) => b.liquidity.usd - a.liquidity.usd)[0];
   return best.liquidity.usd ?? 0;
 }
 
 // D. Holder concentration check via BaseScan
 async function checkHolderConcentration(tokenAddress) {
-  const url = `https://api.basescan.org/api`;
-  const data = await safeGet(url, {
+  const data = await safeGet('https://api.basescan.org/api', {
     module: 'token',
     action: 'tokenholderlist',
     contractaddress: tokenAddress,
@@ -67,46 +66,29 @@ async function checkHolderConcentration(tokenAddress) {
     return { concentrationPct: 0, topHolders: [] };
   }
 
-  const holders = data.result
-    .filter((h) => !BURN_ADDRESSES.has(h.TokenHolderAddress.toLowerCase()))
-    .slice(0, 10);
-
-  if (!holders.length) return { concentrationPct: 0, topHolders: [] };
-
-  const totalSupply = holders.reduce(
-    (acc, h) => acc + BigInt(h.TokenHolderQuantity),
-    0n
-  );
-
-  if (totalSupply === 0n) return { concentrationPct: 0, topHolders: [] };
-
-  // Get full supply for proper percentage
-  const top10Supply = holders.reduce(
-    (acc, h) => acc + BigInt(h.TokenHolderQuantity),
-    0n
-  );
-
-  // Rough concentration - top 10 vs total from list
-  // We request 20 holders so we can compute relative to the visible supply
+  // Filter out known burn addresses
   const allHolders = data.result.filter(
     (h) => !BURN_ADDRESSES.has(h.TokenHolderAddress.toLowerCase())
   );
-  const allSupply = allHolders.reduce(
-    (acc, h) => acc + BigInt(h.TokenHolderQuantity),
-    0n
-  );
 
-  if (allSupply === 0n) return { concentrationPct: 0, topHolders: [] };
+  if (!allHolders.length) return { concentrationPct: 0, topHolders: [] };
+
+  // Top 10 holders vs all returned holders (up to 20)
+  const top10 = allHolders.slice(0, 10);
+
+  const top10Supply = top10.reduce((acc, h) => acc + BigInt(h.TokenHolderQuantity), 0n);
+  const allSupply = allHolders.reduce((acc, h) => acc + BigInt(h.TokenHolderQuantity), 0n);
+
+  if (allSupply === 0n) return { concentrationPct: 0, topHolders: top10 };
 
   const concentrationPct = Number((top10Supply * 10000n) / allSupply) / 100;
 
-  return { concentrationPct, topHolders: holders };
+  return { concentrationPct, topHolders: top10 };
 }
 
 // E. Contract verification check via BaseScan
 async function checkContractVerified(tokenAddress) {
-  const url = `https://api.basescan.org/api`;
-  const data = await safeGet(url, {
+  const data = await safeGet('https://api.basescan.org/api', {
     module: 'contract',
     action: 'getsourcecode',
     address: tokenAddress,
@@ -116,10 +98,12 @@ async function checkContractVerified(tokenAddress) {
   if (!data || data.status !== '1' || !data.result?.[0]) return false;
 
   const sourceCode = data.result[0].SourceCode;
-  return sourceCode && sourceCode.length > 0;
+  return typeof sourceCode === 'string' && sourceCode.length > 0;
 }
 
-// Main security check function
+// ─────────────────────────────────────────────────────────────────────────────
+// Main security check — runs all 5 layers in order
+// ─────────────────────────────────────────────────────────────────────────────
 export async function checkTokenSecurity(tokenAddress) {
   logger.security(`Running security checks for ${tokenAddress}...`);
 
@@ -134,7 +118,7 @@ export async function checkTokenSecurity(tokenAddress) {
     isVerified: false,
   };
 
-  // A. HONEYPOT CHECK (Critical)
+  // A. HONEYPOT CHECK (Critical — immediate reject)
   logger.security(`[1/5] Honeypot check...`);
   const { isHoneypot, buyTax, sellTax } = await checkHoneypot(tokenAddress);
   result.buyTax = buyTax;
@@ -146,7 +130,7 @@ export async function checkTokenSecurity(tokenAddress) {
     return result;
   }
 
-  // B. TAX CHECK
+  // B. TAX CHECK (>10% → immediate reject)
   logger.security(`[2/5] Tax check (buy=${buyTax}%, sell=${sellTax}%)...`);
   if (buyTax > config.maxTaxPct || sellTax > config.maxTaxPct) {
     result.reasons.push(`Tax too high (buy=${buyTax}%, sell=${sellTax}%)`);
@@ -159,7 +143,7 @@ export async function checkTokenSecurity(tokenAddress) {
   if (maxTax > 8) result.riskScore += 10;
   else if (maxTax > 5) result.riskScore += 5;
 
-  // C. LIQUIDITY CHECK
+  // C. LIQUIDITY CHECK (<$5000 → immediate reject)
   logger.security(`[3/5] Liquidity check...`);
   const liquidity = await checkLiquidity(tokenAddress);
   result.liquidity = liquidity;
@@ -170,18 +154,18 @@ export async function checkTokenSecurity(tokenAddress) {
     return result;
   }
 
-  // D. HOLDER CONCENTRATION CHECK
+  // D. HOLDER CONCENTRATION CHECK (top10 >30% → +25 risk)
   logger.security(`[4/5] Holder concentration check...`);
   const { concentrationPct } = await checkHolderConcentration(tokenAddress);
   result.concentrationPct = concentrationPct;
 
   if (concentrationPct > config.holderConcentrationThreshold) {
     result.riskScore += 25;
-    result.reasons.push(`High holder concentration: ${concentrationPct.toFixed(1)}% (top 10)`);
+    result.reasons.push(`High holder concentration: ${concentrationPct.toFixed(1)}% in top 10`);
     logger.security(`WARNING: Top 10 holders own ${concentrationPct.toFixed(1)}% → +25 risk`);
   }
 
-  // E. CONTRACT VERIFICATION
+  // E. CONTRACT VERIFICATION (not verified → +15 risk)
   logger.security(`[5/5] Contract verification check...`);
   const isVerified = await checkContractVerified(tokenAddress);
   result.isVerified = isVerified;
@@ -194,7 +178,7 @@ export async function checkTokenSecurity(tokenAddress) {
 
   // F. FINAL RISK SCORE
   logger.security(
-    `Final risk score: ${result.riskScore}/100 (max allowed: ${config.maxRiskScore})`
+    `Final risk score: ${result.riskScore}/100 (threshold: <${config.maxRiskScore})`
   );
 
   if (result.riskScore < config.maxRiskScore) {

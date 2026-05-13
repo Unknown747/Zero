@@ -9,6 +9,9 @@ const QUOTE_TOKEN = config.quoteToken.toLowerCase();
  * Start the pair scanner.
  * Calls onNewPair({ tokenAddress, pairAddress, blockNumber, dex, fee?, stable? })
  * whenever a new pair involving the QUOTE_TOKEN is detected.
+ *
+ * In ethers v6, the last argument to a contract event listener is the EventLog object.
+ * EventLog has .blockNumber, .transactionHash, etc. directly — not nested under .log.
  */
 export function startScanner(wsProvider, onNewPair) {
   // ─── Uniswap V3 ───────────────────────────────────────────────────
@@ -26,10 +29,11 @@ export function startScanner(wsProvider, onNewPair) {
 
     const tokenAddress = t0 === QUOTE_TOKEN ? token1 : token0;
     const pairAddress = pool;
-    const blockNumber = event.log?.blockNumber ?? 0;
+    // ethers v6: last arg IS the EventLog — use event.blockNumber directly
+    const blockNumber = event?.blockNumber ?? 0;
 
     logger.scan(
-      `[Uniswap V3] New pool detected! Token: ${tokenAddress} | Pool: ${pairAddress} | Fee: ${fee} | Block: ${blockNumber}`
+      `[Uniswap V3] New pool! Token: ${tokenAddress} | Pool: ${pairAddress} | Fee: ${fee} | Block: ${blockNumber}`
     );
 
     onNewPair({
@@ -58,10 +62,10 @@ export function startScanner(wsProvider, onNewPair) {
 
     const tokenAddress = t0 === QUOTE_TOKEN ? token1 : token0;
     const pairAddress = pair;
-    const blockNumber = event.log?.blockNumber ?? 0;
+    const blockNumber = event?.blockNumber ?? 0;
 
     logger.scan(
-      `[Aerodrome] New pair detected! Token: ${tokenAddress} | Pair: ${pairAddress} | Stable: ${stable} | Block: ${blockNumber}`
+      `[Aerodrome] New pair! Token: ${tokenAddress} | Pair: ${pairAddress} | Stable: ${stable} | Block: ${blockNumber}`
     );
 
     onNewPair({
@@ -74,8 +78,4 @@ export function startScanner(wsProvider, onNewPair) {
   });
 
   logger.info(`Listening to Aerodrome Factory (${config.aerodromeFactory})...`);
-
-  // ─── Error handling ────────────────────────────────────────────────
-  // Note: ethers.js v6 contracts do not support .on('error').
-  // Provider-level errors are handled via the websocket's underlying connection.
 }

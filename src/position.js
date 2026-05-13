@@ -5,14 +5,16 @@ import { logger } from './logger.js';
 let positionIdCounter = 1;
 
 export class Position {
-  constructor({ tokenAddress, pairAddress, dex, entryPrice, amountIn, tokenAmount, tokenDecimals, symbol }) {
+  constructor({ tokenAddress, pairAddress, dex, entryPrice, amountIn, tokenAmount, tokenDecimals, symbol, fee, stable }) {
     this.id = positionIdCounter++;
     this.tokenAddress = tokenAddress;
     this.pairAddress = pairAddress;
-    this.dex = dex; // 'uniswapV3' | 'aerodrome'
-    this.entryPrice = entryPrice;           // price in USD or ETH per token
-    this.amountIn = amountIn;               // ETH spent (BigInt wei)
-    this.tokenAmount = tokenAmount;         // tokens received (BigInt)
+    this.dex = dex;             // 'uniswapV3' | 'aerodrome'
+    this.fee = fee ?? 3000;     // Uniswap V3 fee tier (100, 500, 3000, 10000)
+    this.stable = stable ?? false; // Aerodrome stable pool flag
+    this.entryPrice = entryPrice;  // price in USD per token
+    this.amountIn = amountIn;      // ETH spent (BigInt wei)
+    this.tokenAmount = tokenAmount; // tokens received (BigInt)
     this.tokenDecimals = tokenDecimals;
     this.symbol = symbol;
     this.openedAt = Date.now();
@@ -89,7 +91,7 @@ export class PositionManager {
 
   /**
    * Compute the ETH amount to spend for a new trade.
-   * Up to 40% of current wallet balance, but at least MIN_TRADE_ETH.
+   * Up to 40% of current wallet balance, minimum MIN_TRADE_ETH.
    */
   async computeTradeAmount(provider, walletAddress) {
     const balance = await provider.getBalance(walletAddress);
@@ -107,11 +109,11 @@ export class PositionManager {
 
   /**
    * Evaluate all TP/SL conditions for a position.
-   * Returns a sell action if a condition is triggered.
+   * Returns a sell action if a condition is triggered, otherwise null.
    *
    * sellAction: {
    *   type: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING' | 'TIME_EXIT',
-   *   sellPct: number,  // 0-100 percent of remaining tokens
+   *   sellPct: number,   // percentage of remaining tokens to sell (0–100)
    *   sellAll: boolean
    * }
    */
@@ -119,7 +121,7 @@ export class PositionManager {
     const profit = position.profitPct(currentPrice);
     const ageHours = (Date.now() - position.openedAt) / 1000 / 3600;
 
-    // Update trailing
+    // Update trailing state
     position.updateHighestPrice(currentPrice);
     position.activateTrailing(currentPrice);
 
@@ -129,7 +131,7 @@ export class PositionManager {
       return { type: 'SL', sellPct: 100, sellAll: true };
     }
 
-    // --- TRAILING STOP ---
+    // --- TRAILING STOP (only active after profit threshold reached) ---
     if (position.trailingActive) {
       const trailingTrigger = position.highestPrice * (1 - config.trailingDistancePct / 100);
       if (currentPrice <= trailingTrigger) {
@@ -137,12 +139,12 @@ export class PositionManager {
       }
     }
 
-    // --- TIME EXIT ---
+    // --- TIME EXIT (holding too long with low profit) ---
     if (ageHours >= config.timeExitHours && profit < config.timeExitMinProfitPct) {
       return { type: 'TIME_EXIT', sellPct: 100, sellAll: true };
     }
 
-    // --- TAKE PROFIT LEVELS ---
+    // --- TAKE PROFIT LEVELS (checked highest first to avoid skipping) ---
     if (!position.tp3Hit && profit >= config.tp3Pct) {
       position.tp3Hit = true;
       return { type: 'TP3', sellPct: config.tp3SellPct, sellAll: false };
